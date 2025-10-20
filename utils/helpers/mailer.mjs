@@ -2,26 +2,31 @@ import nodemailer from "nodemailer";
 
 //configure nodemailer transporter
 const transporter = nodemailer.createTransport({
-  service: "gmail",
+  host: "smtp.gmail.com",
+  port: 465,
+  secure: true,
   auth: {
     user: process.env.AKIRA_EMAIL,
     pass: process.env.AKIRA_APP_PASSWORD,
   },
 });
 
-export const sendMail = (recipient, mailSubject, mailText, mailHtml) => {
-  try {
-    const mailOptions = {
-      from: process.env.AKIRA_EMAIL,
-      to: recipient,
-      subject: mailSubject,
-      text: mailText,
-      html: mailHtml,
-    };
+export const sendMail = async (recipient, subject, text, html) => {
+  console.log(process.env.AKIRA_EMAIL, process.env.AKIRA_APP_PASSWORD);
+  const mailOptions = {
+    from: process.env.AKIRA_EMAIL,
+    to: recipient,
+    subject: subject,
+    text: text,
+    html: html,
+  };
 
-    transporter.sendMail(mailOptions);
+  try {
+    await transporter.sendMail(mailOptions);
+    console.log("Email sent successfully");
+    return true;
   } catch (error) {
-    console.log(error);
-    return { err: "Unauthorized request" };
+    console.error("Error sending email:", error);
+    return false;
   }
 };

@@ -1,6 +1,6 @@
 import { Router } from "express";
 import waitListRouter from '../routes/waitlist/index.mjs'
-import akiraUserRouter from '../routes/akira-user/index.mjs'
+import akiraUserRouter from '../routes/users/index.mjs'
 
 const router = Router()
 

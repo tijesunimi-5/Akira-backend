@@ -9,7 +9,12 @@ dotenv.config();
 const app = express();
 app.use(express.json());
 app.use(express.urlencoded({ extended: true }));
-app.use(cors());
+app.use(
+  cors({
+    origin: "http://localhost:3000", // your frontend
+    credentials: true, // allow cookies
+  })
+);
 app.use(
   session({
     secret: process.env.SESSION_SECRET,
@@ -17,8 +22,8 @@ app.use(
     resave: false,
     rolling: true,
     cookie: {
-      maxAge: 6 * 60 * 60 * 1000
-    }
+      maxAge: 6 * 60 * 60 * 1000,
+    },
   })
 );
 app.use(routes);

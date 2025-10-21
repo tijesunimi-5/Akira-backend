@@ -597,4 +597,47 @@ router.get("/products/analyze", validateSession, async (request, response) => {
   }
 });
 
+
+router.post("/products/enhance-description", validateSession, async (request, response) => {
+    const { productId, description, productName } = request.body;
+
+    if (!productId) {
+      return response.status(400).send({ message: "Product ID is required." });
+    }
+
+    try {
+      const enhancedDescription = `✨ Introducing the ${productName}! ✨\n\n${description || 'This amazing product'} just got even better. Experience top-tier quality and unmatched design, crafted just for you. Perfect for any occasion and built to last. \n\nDon't miss out—elevate your collection today!`;
+      
+      
+      const updateQuery = `
+        UPDATE "products" 
+        SET "description" = $1 
+        WHERE "id" = $2 
+        RETURNING *; 
+      `;
+      
+      const updatedProductResult = await pool.query(updateQuery, [enhancedDescription, productId]);
+      
+      if (updatedProductResult.rows.length === 0) {
+        return response.status(404).send({ message: "Product not found to update." });
+      }
+      
+      const updatedProduct = updatedProductResult.rows[0];
+
+      const analysis = analyzeProduct(updatedProduct);
+
+      const finalProduct = {
+        ...updatedProduct,
+        ...analysis 
+      };
+
+      return response.status(200).send(finalProduct);
+
+    } catch (error) {
+      console.error("AI Enhancement Error:", error);
+      return response.status(500).send({ message: "Error enhancing description." });
+    }
+  }
+);
+
 export default router;

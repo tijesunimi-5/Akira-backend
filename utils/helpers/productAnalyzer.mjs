@@ -25,7 +25,7 @@ export const analyzeProduct = (product) => {
   }
 
   // Rule 2: Check for a product image
-  if (!product.imageUrl) {
+  if (!product.imageUrls || product.imageUrls.length === 0) {
     // <-- Using the fixed 'imageUrl'
     score -= 25;
     const failMessage = "Missing a product image.";

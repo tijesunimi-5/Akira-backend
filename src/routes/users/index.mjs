@@ -202,7 +202,8 @@ router.post("/create-store", validateSession, async (request, response) => {
 
     for (const product of dummyProducts) {
       await pool.query(
-        `INSERT INTO "products" ("id", "storeId", "externalId", "name", "description", "price", "stock", "imageUrl") 
+        // --- MODIFIED: "imageUrl" -> "imageUrls" ---
+        `INSERT INTO "products" ("id", "storeId", "externalId", "name", "description", "price", "stock", "imageUrls") 
          VALUES ($1, $2, $3, $4, $5, $6, $7, $8)`,
         [
           `prod_${generateID(10)}`,
@@ -212,7 +213,8 @@ router.post("/create-store", validateSession, async (request, response) => {
           product.description,
           product.price,
           product.stock,
-          product.imageUrl,
+          // --- MODIFIED: Wrap in an array or send an empty array ---
+          product.imageUrl ? [product.imageUrl] : [],
         ]
       );
     }
@@ -636,6 +638,50 @@ router.post("/products/enhance-description", validateSession, async (request, re
     } catch (error) {
       console.error("AI Enhancement Error:", error);
       return response.status(500).send({ message: "Error enhancing description." });
+    }
+  }
+);
+
+// In index.mjs, inside the "ALL POST ROUTES" section
+
+router.post("/products/update-description", validateSession, async (request, response) => {
+    const { productId, description } = request.body; // No productName needed
+
+    if (!productId) {
+      return response.status(400).send({ message: "Product ID is required." });
+    }
+
+    try {
+      // --- 1. Update the product in your database ---
+      const updateQuery = `
+        UPDATE "products" 
+        SET "description" = $1 
+        WHERE "id" = $2 
+        RETURNING *; 
+      `;
+      
+      const updatedProductResult = await pool.query(updateQuery, [description, productId]);
+      
+      if (updatedProductResult.rows.length === 0) {
+        return response.status(404).send({ message: "Product not found to update." });
+      }
+      
+      const updatedProduct = updatedProductResult.rows[0];
+
+      // --- 2. Re-analyze the product for its new health score ---
+      const analysis = analyzeProduct(updatedProduct);
+
+      // --- 3. Send the full, re-analyzed product back ---
+      const finalProduct = {
+        ...updatedProduct, 
+        ...analysis 
+      };
+
+      return response.status(200).send(finalProduct);
+
+    } catch (error) {
+      console.error("Update Description Error:", error);
+      return response.status(500).send({ message: "Error saving description." });
     }
   }
 );

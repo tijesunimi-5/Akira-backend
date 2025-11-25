@@ -202,7 +202,7 @@ router.post("/create-store", validateSession, async (request, response) => {
 
     for (const product of dummyProducts) {
       await pool.query(
-        // --- MODIFIED: "imageUrl" -> "imageUrls" ---
+        // --- THIS LINE IS WRONG ---
         `INSERT INTO "products" ("id", "storeId", "externalId", "name", "description", "price", "stock", "imageUrls") 
          VALUES ($1, $2, $3, $4, $5, $6, $7, $8)`,
         [
@@ -213,8 +213,7 @@ router.post("/create-store", validateSession, async (request, response) => {
           product.description,
           product.price,
           product.stock,
-          // --- MODIFIED: Wrap in an array or send an empty array ---
-          product.imageUrl ? [product.imageUrl] : [],
+          product.imageUrls, 
         ]
       );
     }
@@ -451,40 +450,114 @@ router.patch("/edit", validateSession, async (request, response) => {
   }
 });
 
-//Route for forgot password
-router.post("/reset-password", async (request, response) => {
-  const { email, password } = request.body;
-  const fetch_user = "SELECT * FROM users WHERE email = $1";
-  const validatedPassword = passwordValidator(password);
-  const user = (await pool.query(fetch_user, [email])).rows[0];
+// New Route: Initiates Password Reset (Sends code to email)
+router.post("/user/forgot-password", async (request, response) => {
+    const { email } = request.body;
 
-  try {
-    if (!user) {
-      return response.status(404).send({ message: "User not found" });
+    try {
+        const userQuery = await pool.query("SELECT id, name FROM users WHERE email = $1", [email]);
+
+        if (userQuery.rows.length === 0) {
+            // For security, respond vaguely even if the email doesn't exist
+            return response.status(200).send({ message: "If the account exists, a reset code has been sent." });
+        }
+        
+        const user = userQuery.rows[0];
+        
+        // 1. Generate a confirmation code (used as the reset token)
+        const codeData = getConfirmationCode(email); // Reusing OTP logic for reset token
+        const resetCode = codeData.otpCode;
+        const expiresAt = codeData.expiresAt;
+        
+        // 2. Store the code in the confirmation_tokens table or a dedicated reset_tokens table
+        // Delete any old tokens for this user/email
+        await pool.query("DELETE FROM confirmation_tokens WHERE email_to_confirm = $1", [email]);
+
+        // Insert new reset token
+        await pool.query(
+            "INSERT INTO confirmation_tokens (user_id, otp, email_to_confirm, created_at, expires_at, type) VALUES ($1, $2, $3, NOW(), $4, $5)",
+            [user.id, resetCode, email, expiresAt, 'password_reset'] // Assuming a 'type' column can differentiate reset vs signup
+        );
+
+        // 3. Send email with the reset code
+        const subject = "Akira AI Password Reset Code";
+        const text = `Your password reset code is: ${resetCode}. This code expires shortly. Use it on the reset page.`;
+        const html = `<p>Your password reset code is: <b>${resetCode}</b>. This code expires shortly.</p>
+                      <p>If you did not request a password reset, please ignore this email.</p>`;
+
+        const mailSent = await sendMail(email, subject, text, html);
+
+        if (!mailSent) {
+            console.error("Failed to send reset email.");
+        }
+
+        // Return a successful message regardless of whether the user exists (for security)
+        return response.status(200).send({
+            message: "A password reset code has been sent to your email address.",
+        });
+
+    } catch (error) {
+        console.error("Forgot Password Error:", error);
+        return response.status(500).send({ message: "Server error during password reset request." });
     }
+});
+
+// New Route: Finalizes Password Reset (Verifies code and updates password)
+router.post("/user/reset-password", async (request, response) => {
+    const { email, code, password: newPassword } = request.body; 
+
+    // 1. Initial Validation
+    if (!email || !code || !newPassword) {
+        return response.status(400).send({ message: "Email, code, and new password are required." });
+    }
+
+    const validatedPassword = passwordValidator(newPassword);
 
     if (!validatedPassword.valid) {
-      return response.status(400).send({
-        message: "Password does meet requirements",
-        requirements: validatedPassword.errors,
-      });
+        return response.status(400).send({
+            message: "Password does not meet requirements.",
+            requirements: validatedPassword.errors,
+        });
     }
 
-    const hashedPassword = await hashPassword(password);
-    await pool.query("UPDATE users SET password_hashed = $1 WHERE email = $2", [
-      hashedPassword,
-      email,
-    ]);
+    try {
+        // 2. Verify the Code and Expiration Time
+        // Ensures the code matches the email and hasn't expired (expires_at > NOW())
+        const fetch_code_query = `
+            SELECT u.id, t.expires_at 
+            FROM users u
+            JOIN confirmation_tokens t ON u.id = t.user_id 
+            WHERE u.email = $1 AND t.otp = $2 AND t.expires_at > NOW()
+            ORDER BY t.created_at DESC LIMIT 1;
+        `;
+        const codeResult = await pool.query(fetch_code_query, [email, code]);
 
-    return response
-      .status(200)
-      .send({ message: "Password has been  resetted" });
-  } catch (error) {
-    console.error("An error occured:", error);
-    return response
-      .status(500)
-      .send({ message: "An error occured", error: error });
-  }
+        if (codeResult.rows.length === 0) {
+            return response.status(401).send({ message: "Invalid or expired reset code." });
+        }
+        
+        const userId = codeResult.rows[0].id;
+
+        // 3. Hash and Update the Password
+        const hashedPassword = await hashPassword(newPassword);
+        
+        await pool.query("UPDATE users SET password = $1 WHERE id = $2", [
+            hashedPassword,
+            userId,
+        ]);
+
+        // 4. Invalidate the Token
+        await pool.query("DELETE FROM confirmation_tokens WHERE user_id = $1 AND otp = $2", [
+            userId,
+            code,
+        ]);
+
+        return response.status(200).send({ message: "Password has been successfully reset. You can now log in." });
+        
+    } catch (error) {
+        console.error("Password Reset Error:", error);
+        return response.status(500).send({ message: "An error occurred during password reset." });
+    }
 });
 
 router.patch("/upgrade-plan", validateSession, async (request, response) => {

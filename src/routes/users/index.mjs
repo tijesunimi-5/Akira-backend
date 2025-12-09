@@ -30,6 +30,8 @@ const buildUserFeedback = (user) => ({
     ? {
         storeName: user.storeName,
         storeUrl: user.storeUrl,
+        storeId: user.storeId,
+        snippetToken: user.snippetToken, // ⚡ Now correctly passed from the SELECT query ⚡
       }
     : null,
 });
@@ -181,6 +183,7 @@ router.post(
 );
 
 router.post("/create-store", validateSession, async (request, response) => {
+  // request.user is populated by validateSession middleware
   const { userId, name: userName } = request.user;
   const { url, platform } = request.body;
 
@@ -190,21 +193,30 @@ router.post("/create-store", validateSession, async (request, response) => {
       .send({ message: "URL and platform are required." });
   }
 
+  // ⚡ Start a database transaction for atomicity ⚡
+  const client = await pool.connect();
+
   try {
+    await client.query("BEGIN");
+
+    // 1. Generate unique IDs and a secure token
     const storeId = `store_${generateID(10)}`;
     const storeName = `${userName}'s Demo Store`;
+    // Generate a unique token for the frontend snippet to use for authentication
+    const snippetToken = `akira_snip_${generateID(25)}`;
 
-    await pool.query(
-      `INSERT INTO "stores" ("id", "userId", "storeName", "platform", "storeUrl", "updatedAt") 
-         VALUES ($1, $2, $3, $4, $5, CURRENT_TIMESTAMP)`,
-      [storeId, userId, storeName, platform.toUpperCase(), url]
+    // 2. Insert the new store record with the generated token
+    await client.query(
+      `INSERT INTO "stores" ("id", "userId", "storeName", "platform", "storeUrl", "updatedAt", "snippetToken") 
+             VALUES ($1, $2, $3, $4, $5, CURRENT_TIMESTAMP, $6)`,
+      [storeId, userId, storeName, platform.toUpperCase(), url, snippetToken]
     );
 
+    // 3. Insert dummy products for the new store
     for (const product of dummyProducts) {
-      await pool.query(
-        // --- THIS LINE IS WRONG ---
+      await client.query(
         `INSERT INTO "products" ("id", "storeId", "externalId", "name", "description", "price", "stock", "imageUrls") 
-         VALUES ($1, $2, $3, $4, $5, $6, $7, $8)`,
+                 VALUES ($1, $2, $3, $4, $5, $6, $7, $8)`,
         [
           `prod_${generateID(10)}`,
           storeId,
@@ -213,31 +225,49 @@ router.post("/create-store", validateSession, async (request, response) => {
           product.description,
           product.price,
           product.stock,
-          product.imageUrls, 
+          product.imageUrls,
         ]
       );
     }
 
+    // 4. Commit the transaction
+    await client.query("COMMIT");
+
+    // 5. Retrieve the fully updated user data including the new store/token details
     const updatedUserQuery = `
-        SELECT u.*, s."storeName", s."storeUrl" 
-        FROM "users" u
-        LEFT JOIN "stores" s ON u."id" = s."userId"
-        WHERE u."id" = $1;
-    `;
+            SELECT 
+                u.id, u.name, u.email, u.plan, 
+                s.id AS "storeId", 
+                s."storeName", 
+                s."storeUrl",
+                s."snippetToken" -- ⚡ CRITICAL: Retrieve the new token
+            FROM "users" u
+            LEFT JOIN "stores" s ON u."id" = s."userId"
+            WHERE u."id" = $1;
+        `;
     const updatedUserResult = await pool.query(updatedUserQuery, [userId]);
 
-    return response.status(201).send({
-      message: "Dummy store and products created successfully!",
-      data: buildUserFeedback(updatedUserResult.rows[0]),
-    });
+    // Ensure the token is passed in the feedback object
+    const userDataWithStore = updatedUserResult.rows[0];
 
+    // The user object sent back now includes storeId and snippetToken
+    return response.status(201).send({
+      message: "Store created and products synced successfully!",
+      data: buildUserFeedback(userDataWithStore),
+    });
   } catch (error) {
+    // Rollback transaction on any error
+    await client.query("ROLLBACK");
     console.error("Create Store Error:", error);
     return response
       .status(500)
       .send({ message: "Server error during store creation." });
+  } finally {
+    client.release();
   }
 });
+
+
 
 //route to confirm the registration code
 router.post("/confirm", async (request, response) => {

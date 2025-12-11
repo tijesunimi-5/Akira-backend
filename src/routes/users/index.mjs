@@ -31,7 +31,8 @@ const buildUserFeedback = (user) => ({
         storeName: user.storeName,
         storeUrl: user.storeUrl,
         storeId: user.storeId,
-        snippetToken: user.snippetToken, // ⚡ Now correctly passed from the SELECT query ⚡
+        platform: user.platform, // ⚡ Pass it through ⚡
+        snippetToken: user.snippetToken,
       }
     : null,
 });
@@ -59,15 +60,41 @@ router.get("/users", validateSession, async (request, response) => {
 });
 
 router.get("/verify-session", validateSession, async (request, response) => {
-  const userQueryText = `SELECT u.id, u.name, u.email, u.plan, s."storeName", s."storeUrl" FROM "users" u LEFT JOIN "stores" s ON u."id" = s."userId" WHERE u."id" = $1`;
-  const result = await pool.query(userQueryText, [request.user.userId]);
-  if (result.rows.length === 0) {
-    return response.status(404).send({ message: "User not found." });
+  // ⚡ CORRECTED QUERY ⚡
+  const userQueryText = `
+    SELECT 
+        u.id, 
+        u.name, 
+        u.email, 
+        u.plan, 
+        s.id AS "storeId", 
+        s."storeName", 
+        s."storeUrl",
+        s."platform",  
+        s."snippetToken"               
+    FROM "users" u 
+    LEFT JOIN "stores" s ON u."id" = s."userId" 
+    WHERE u."id" = $1
+`;
+
+  try {
+    const result = await pool.query(userQueryText, [request.user.userId]);
+
+    if (result.rows.length === 0) {
+      return response.status(404).send({ message: "User not found." });
+    }
+
+    // Pass the result (which now includes storeId and snippetToken) to buildUserFeedback
+    response.status(200).send({
+      message: "Session is valid.",
+      user: buildUserFeedback(result.rows[0]),
+    });
+  } catch (error) {
+    console.error("Error verifying session:", error);
+    return response
+      .status(500)
+      .send({ message: "Server error during session verification." });
   }
-  response.status(200).send({
-    message: "Session is valid.",
-    user: buildUserFeedback(result.rows[0]),
-  });
 });
 
 //get users by filter
@@ -182,90 +209,7 @@ router.post(
   }
 );
 
-router.post("/create-store", validateSession, async (request, response) => {
-  // request.user is populated by validateSession middleware
-  const { userId, name: userName } = request.user;
-  const { url, platform } = request.body;
 
-  if (!url || !platform) {
-    return response
-      .status(400)
-      .send({ message: "URL and platform are required." });
-  }
-
-  // ⚡ Start a database transaction for atomicity ⚡
-  const client = await pool.connect();
-
-  try {
-    await client.query("BEGIN");
-
-    // 1. Generate unique IDs and a secure token
-    const storeId = `store_${generateID(10)}`;
-    const storeName = `${userName}'s Demo Store`;
-    // Generate a unique token for the frontend snippet to use for authentication
-    const snippetToken = `akira_snip_${generateID(25)}`;
-
-    // 2. Insert the new store record with the generated token
-    await client.query(
-      `INSERT INTO "stores" ("id", "userId", "storeName", "platform", "storeUrl", "updatedAt", "snippetToken") 
-             VALUES ($1, $2, $3, $4, $5, CURRENT_TIMESTAMP, $6)`,
-      [storeId, userId, storeName, platform.toUpperCase(), url, snippetToken]
-    );
-
-    // 3. Insert dummy products for the new store
-    for (const product of dummyProducts) {
-      await client.query(
-        `INSERT INTO "products" ("id", "storeId", "externalId", "name", "description", "price", "stock", "imageUrls") 
-                 VALUES ($1, $2, $3, $4, $5, $6, $7, $8)`,
-        [
-          `prod_${generateID(10)}`,
-          storeId,
-          product.externalId,
-          product.name,
-          product.description,
-          product.price,
-          product.stock,
-          product.imageUrls,
-        ]
-      );
-    }
-
-    // 4. Commit the transaction
-    await client.query("COMMIT");
-
-    // 5. Retrieve the fully updated user data including the new store/token details
-    const updatedUserQuery = `
-            SELECT 
-                u.id, u.name, u.email, u.plan, 
-                s.id AS "storeId", 
-                s."storeName", 
-                s."storeUrl",
-                s."snippetToken" -- ⚡ CRITICAL: Retrieve the new token
-            FROM "users" u
-            LEFT JOIN "stores" s ON u."id" = s."userId"
-            WHERE u."id" = $1;
-        `;
-    const updatedUserResult = await pool.query(updatedUserQuery, [userId]);
-
-    // Ensure the token is passed in the feedback object
-    const userDataWithStore = updatedUserResult.rows[0];
-
-    // The user object sent back now includes storeId and snippetToken
-    return response.status(201).send({
-      message: "Store created and products synced successfully!",
-      data: buildUserFeedback(userDataWithStore),
-    });
-  } catch (error) {
-    // Rollback transaction on any error
-    await client.query("ROLLBACK");
-    console.error("Create Store Error:", error);
-    return response
-      .status(500)
-      .send({ message: "Server error during store creation." });
-  } finally {
-    client.release();
-  }
-});
 
 
 
@@ -627,166 +571,6 @@ router.patch("/upgrade-plan", validateSession, async (request, response) => {
   }
 });
 
-router.get("/products", validateSession, async (request, response) => {
-  const { userId } = request.user;
 
-  try {
-    // We use a JOIN to efficiently get products belonging to the current user's store
-    const query = `
-      SELECT p.* FROM "products" p
-      JOIN "stores" s ON p."storeId" = s."id"
-      WHERE s."userId" = $1;
-    `;
-
-    const result = await pool.query(query, [userId]);
-
-    return response.status(200).send({
-      message: "Products fetched successfully",
-      data: result.rows,
-    });
-  } catch (error) {
-    console.error("Fetch Products Error:", error);
-    return response
-      .status(500)
-      .send({ message: "Server error while fetching products." });
-  }
-});
-
-router.get("/products/analyze", validateSession, async (request, response) => {
-  const { userId } = request.user;
-  try {
-    const productQuery = `SELECT p.* FROM "products" p JOIN "stores" s ON p."storeId" = s."id" WHERE s."userId" = $1`;
-    const productsResult = await pool.query(productQuery, [userId]);
-    const products = productsResult.rows;
-
-    if (products.length === 0) {
-      return response.status(200).send({
-        message: "No products found to analyze.",
-        data: {
-          analysisSummary: {
-            totalProducts: 0,
-            strongCount: 0,
-            weakCount: 0,
-            healthScore: 0,
-          },
-          analyzedProducts: [],
-        },
-      });
-    }
-
-    let strongCount = 0;
-    const analyzedProducts = products.map((product) => {
-      const analysis = analyzeProduct(product);
-      if (analysis.status === "Strong") {
-        strongCount++;
-      }
-      return { ...product, ...analysis };
-    });
-
-    const analysisSummary = {
-      totalProducts: products.length,
-      strongCount: strongCount,
-      weakCount: products.length - strongCount,
-      healthScore: Math.round((strongCount / products.length) * 100),
-    };
-
-    return response.status(200).send({
-      message: "Analysis complete",
-      data: { analysisSummary, analyzedProducts },
-    });
-  } catch (error) {
-    console.error("Analyze Products Error:", error);
-    return response
-      .status(500)
-      .send({ message: "Server error during product analysis." });
-  }
-});
-
-
-router.post("/products/enhance-description", validateSession, async (request, response) => {
-    const { productId, description, productName } = request.body;
-
-    if (!productId) {
-      return response.status(400).send({ message: "Product ID is required." });
-    }
-
-    try {
-      const enhancedDescription = `✨ Introducing the ${productName}! ✨\n\n${description || 'This amazing product'} just got even better. Experience top-tier quality and unmatched design, crafted just for you. Perfect for any occasion and built to last. \n\nDon't miss out—elevate your collection today!`;
-      
-      
-      const updateQuery = `
-        UPDATE "products" 
-        SET "description" = $1 
-        WHERE "id" = $2 
-        RETURNING *; 
-      `;
-      
-      const updatedProductResult = await pool.query(updateQuery, [enhancedDescription, productId]);
-      
-      if (updatedProductResult.rows.length === 0) {
-        return response.status(404).send({ message: "Product not found to update." });
-      }
-      
-      const updatedProduct = updatedProductResult.rows[0];
-
-      const analysis = analyzeProduct(updatedProduct);
-
-      const finalProduct = {
-        ...updatedProduct,
-        ...analysis 
-      };
-
-      return response.status(200).send(finalProduct);
-
-    } catch (error) {
-      console.error("AI Enhancement Error:", error);
-      return response.status(500).send({ message: "Error enhancing description." });
-    }
-  }
-);
-
-// In index.mjs, inside the "ALL POST ROUTES" section
-
-router.post("/products/update-description", validateSession, async (request, response) => {
-    const { productId, description } = request.body; // No productName needed
-
-    if (!productId) {
-      return response.status(400).send({ message: "Product ID is required." });
-    }
-
-    try {
-      // --- 1. Update the product in your database ---
-      const updateQuery = `
-        UPDATE "products" 
-        SET "description" = $1 
-        WHERE "id" = $2 
-        RETURNING *; 
-      `;
-      
-      const updatedProductResult = await pool.query(updateQuery, [description, productId]);
-      
-      if (updatedProductResult.rows.length === 0) {
-        return response.status(404).send({ message: "Product not found to update." });
-      }
-      
-      const updatedProduct = updatedProductResult.rows[0];
-
-      // --- 2. Re-analyze the product for its new health score ---
-      const analysis = analyzeProduct(updatedProduct);
-
-      // --- 3. Send the full, re-analyzed product back ---
-      const finalProduct = {
-        ...updatedProduct, 
-        ...analysis 
-      };
-
-      return response.status(200).send(finalProduct);
-
-    } catch (error) {
-      console.error("Update Description Error:", error);
-      return response.status(500).send({ message: "Error saving description." });
-    }
-  }
-);
 
 export default router;
